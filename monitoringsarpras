@@ -1,0 +1,557 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { initializeApp } from 'firebase/app';
+import { 
+  getFirestore, 
+  collection, 
+  doc, 
+  setDoc, 
+  onSnapshot, 
+  addDoc, 
+  updateDoc, 
+  deleteDoc,
+  query,
+  orderBy
+} from 'firebase/firestore';
+import { 
+  getAuth, 
+  signInAnonymously, 
+  signInWithCustomToken,
+  onAuthStateChanged 
+} from 'firebase/auth';
+import { 
+  LayoutDashboard, 
+  Plus, 
+  Database, 
+  Settings,
+  Trash2,
+  Camera,
+  Bell,
+  Edit3,
+  AlertTriangle,
+  X,
+  CheckCircle2,
+  Clock,
+  FileText,
+  Download,
+  Printer,
+  Table as TableIcon,
+  List,
+  RefreshCw,
+  Globe
+} from 'lucide-react';
+
+/**
+ * PANDUAN AKTIVASI CLOUD:
+ * 1. Buat Project di console.firebase.google.com
+ * 2. Tambahkan Web App, lalu salin config-nya ke variabel di bawah.
+ * 3. Aktifkan "Anonymous Auth" di menu Authentication.
+ * 4. Aktifkan "Cloud Firestore" dan set Rules ke test mode atau allow read/write.
+ */
+const firebaseConfig = typeof __firebase_config !== 'undefined' 
+  ? JSON.parse(__firebase_config) 
+  : {
+  apiKey: "AIzaSyBvZG0c46fj15eR48aHQlHfVGU_ZlmpSbg",
+  authDomain: "monitoring-sarpras.firebaseapp.com",
+  projectId: "monitoring-sarpras",
+  storageBucket: "monitoring-sarpras.firebasestorage.app",
+  messagingSenderId: "929738031503",
+  appId: "1:929738031503:web:74a394f4a7fa8dc6154bfa",
+  measurementId: "G-Q8C8CC5NGM"
+};
+
+const isConfigValid = firebaseConfig.apiKey && firebaseConfig.apiKey !== "";
+const appId = typeof __app_id !== 'undefined' ? __app_id : 'sarpras-rsudk-v1';
+
+// Inisialisasi Firebase di luar komponen
+let app, auth, db;
+if (isConfigValid) {
+  app = initializeApp(firebaseConfig);
+  auth = getAuth(app);
+  db = getFirestore(app);
+}
+
+const MONTHS = ["Januari", "Februari", "Maret", "April", "Mei", "Juni", "Juli", "Agustus", "September", "Oktober", "November", "Desember"];
+
+export default function App() {
+  const [user, setUser] = useState(null);
+  const [activeTab, setActiveTab] = useState('dashboard');
+  const [rekapSubTab, setRekapSubTab] = useState('ringkasan');
+  const [records, setRecords] = useState([]);
+  const [rooms, setRooms] = useState([]);
+  const [isLoading, setIsLoading] = useState(true);
+  
+  // State Filter
+  const [reportMonth, setReportMonth] = useState(String(new Date().getMonth() + 1).padStart(2, '0'));
+  const [reportYear, setReportYear] = useState(String(new Date().getFullYear()));
+
+  const [formData, setFormData] = useState({
+    tgl: new Date().toISOString().split('T')[0],
+    ruangan: '',
+    temuan: '',
+    tindakan: '',
+    status: 'Belum Selesai',
+    photo: null
+  });
+  
+  const [isEditMode, setIsEditMode] = useState(false);
+  const [currentEditId, setCurrentEditId] = useState(null);
+  const fileInputRef = useRef(null);
+
+  // 1. TANGANI AUTHENTICATION (RULE 3)
+  useEffect(() => {
+    if (!isConfigValid) return;
+
+    const initAuth = async () => {
+      try {
+        if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
+          await signInWithCustomToken(auth, __initial_auth_token);
+        } else {
+          await signInAnonymously(auth);
+        }
+      } catch (err) {
+        console.error("Auth Error:", err);
+      }
+    };
+
+    initAuth();
+    const unsubscribe = onAuthStateChanged(auth, (u) => {
+      setUser(u);
+      if (!u) setIsLoading(false);
+    });
+
+    return () => unsubscribe();
+  }, []);
+
+  // 2. TANGANI FIRESTORE DATA (RULE 1 & 2)
+  useEffect(() => {
+    if (!user || !db) return;
+    setIsLoading(true);
+
+    // Path khusus untuk data publik agar bisa diakses semua komputer (RULE 1)
+    const recordsCol = collection(db, 'artifacts', appId, 'public', 'data', 'monitoring_records');
+    const roomsCol = collection(db, 'artifacts', appId, 'public', 'data', 'master_rooms');
+
+    // Listener Real-time untuk Records
+    const unsubRecords = onSnapshot(recordsCol, (snap) => {
+      const data = snap.docs.map(doc => ({ ...doc.data(), id: doc.id }));
+      // Sorting di memori JS (RULE 2)
+      setRecords(data.sort((a, b) => new Date(b.tgl) - new Date(a.tgl)));
+      setIsLoading(false);
+    }, (err) => {
+      console.error("Firestore Records Error:", err);
+      setIsLoading(false);
+    });
+
+    // Listener Real-time untuk Master Ruangan
+    const unsubRooms = onSnapshot(roomsCol, (snap) => {
+      let data = snap.docs.map(doc => doc.data().name);
+      if (data.length === 0) {
+        // Inisialisasi data awal jika kosong
+        const defaultRooms = ["IGD", "ICU", "POLI", "LAB", "RADIOLOGI", "GIZI", "BANGSAL"];
+        defaultRooms.forEach(n => {
+          setDoc(doc(roomsCol, n), { name: n });
+        });
+        data = defaultRooms;
+      }
+      setRooms(data.sort());
+    }, (err) => console.error("Firestore Rooms Error:", err));
+
+    return () => {
+      unsubRecords();
+      unsubRooms();
+    };
+  }, [user]);
+
+  const handleCapturePhoto = (e) => {
+    const file = e.target.files[0];
+    if (file) {
+      // Validasi ukuran file (Opsional, Firebase punya limit 1MB per doc)
+      if (file.size > 800000) {
+        alert("Ukuran foto terlalu besar. Gunakan foto di bawah 800KB.");
+        return;
+      }
+      const reader = new FileReader();
+      reader.onloadend = () => setFormData({ ...formData, photo: reader.result });
+      reader.readAsDataURL(file);
+    }
+  };
+
+  const handleSubmit = async (e) => {
+    e.preventDefault();
+    if (!formData.ruangan || !user || !db) return;
+
+    try {
+      const docPath = ['artifacts', appId, 'public', 'data', 'monitoring_records'];
+      const payload = { 
+        ...formData, 
+        updatedAt: new Date().toISOString(),
+        updatedBy: user.uid 
+      };
+
+      if (isEditMode && currentEditId) {
+        await updateDoc(doc(db, ...docPath, currentEditId), payload);
+      } else {
+        await addDoc(collection(db, ...docPath), { 
+          ...payload, 
+          createdAt: new Date().toISOString() 
+        });
+      }
+
+      // Reset form
+      setFormData({ 
+        tgl: new Date().toISOString().split('T')[0], 
+        ruangan: '', 
+        temuan: '', 
+        tindakan: '', 
+        status: 'Belum Selesai', 
+        photo: null 
+      });
+      setIsEditMode(false);
+      setActiveTab('database');
+    } catch (err) {
+      alert("Gagal menyimpan ke Cloud. Pastikan koneksi internet stabil.");
+    }
+  };
+
+  const deleteRecord = async (id) => {
+    if (confirm("Hapus laporan ini dari Cloud selamanya? Tindakan ini akan terlihat di semua komputer.")) {
+      await deleteDoc(doc(db, 'artifacts', appId, 'public', 'data', 'monitoring_records', id));
+    }
+  };
+
+  // Filter & Summary logic (Client-side)
+  const filteredRecords = useMemo(() => {
+    return records.filter(r => r.tgl.startsWith(`${reportYear}-${reportMonth}`));
+  }, [records, reportMonth, reportYear]);
+
+  const summaryData = useMemo(() => {
+    return rooms.map(room => {
+      const roomRecords = filteredRecords.filter(r => r.ruangan === room);
+      const total = roomRecords.length;
+      const selesai = roomRecords.filter(r => r.status === 'Selesai').length;
+      const proses = total - selesai;
+      const score = total === 0 ? 100 : Math.round((selesai / total) * 100);
+      return { ruangan: room, total, selesai, proses, score };
+    });
+  }, [rooms, filteredRecords]);
+
+  // Loading State
+  if (!isConfigValid) {
+    return (
+      <div className="h-screen flex items-center justify-center bg-slate-50 p-6 text-center font-sans">
+        <div className="bg-white p-8 rounded-3xl shadow-xl max-w-md border-t-8 border-amber-500">
+          <Globe className="w-16 h-16 text-amber-500 mx-auto mb-4" />
+          <h1 className="text-xl font-black text-slate-800 uppercase mb-2">Setup Firebase</h1>
+          <p className="text-sm text-slate-500 mb-4">Aplikasi butuh <strong>Firebase Config</strong> agar bisa diakses antar komputer.</p>
+          <div className="bg-slate-100 p-3 rounded-lg text-left text-[10px] font-mono break-all mb-4">
+            Ganti firebaseConfig di baris ke-40
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (isLoading) {
+    return (
+      <div className="h-screen flex flex-col items-center justify-center bg-blue-900 text-white font-sans">
+        <RefreshCw className="w-12 h-12 animate-spin mb-4 text-blue-300" />
+        <p className="text-[10px] font-black uppercase tracking-[0.4em]">Sinkronisasi Cloud...</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="min-h-screen bg-slate-50 pb-12 font-sans overflow-x-hidden">
+      {/* Header Utama */}
+      <header className="bg-white border-b-4 border-blue-900 p-4 sticky top-0 z-50 shadow-md flex justify-between items-center no-print">
+        <div className="flex items-center gap-3">
+          <div className="bg-blue-900 p-2 rounded-xl text-white shadow-lg"><Settings size={22} /></div>
+          <div>
+            <h1 className="font-black text-blue-900 uppercase leading-none tracking-tight">Sarpras Cloud</h1>
+            <p className="text-[9px] font-bold text-emerald-600 uppercase mt-1 tracking-widest flex items-center gap-1">
+              <span className="w-1.5 h-1.5 bg-emerald-500 rounded-full animate-pulse"></span> Terhubung: Multi-User
+            </p>
+          </div>
+        </div>
+        
+        <nav className="flex gap-1 bg-slate-100 p-1 rounded-2xl">
+          {[
+            { id: 'dashboard', icon: <LayoutDashboard size={16}/>, label: 'Home' },
+            { id: 'input', icon: <Plus size={16}/>, label: 'Input' },
+            { id: 'database', icon: <Database size={16}/>, label: 'Data' },
+            { id: 'rekap', icon: <FileText size={16}/>, label: 'Rekap' }
+          ].map(tab => (
+            <button 
+              key={tab.id}
+              onClick={() => setActiveTab(tab.id)} 
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-all ${activeTab===tab.id?'bg-white text-blue-900 shadow-sm':'text-slate-400 hover:text-slate-600'}`}
+            >
+              {tab.icon}<span className="hidden md:block uppercase">{tab.label}</span>
+            </button>
+          ))}
+        </nav>
+      </header>
+
+      <main className="p-4 max-w-6xl mx-auto space-y-6">
+        
+        {/* DASHBOARD TAB */}
+        {activeTab === 'dashboard' && (
+          <div className="space-y-6 animate-in fade-in duration-500 no-print">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+              <div className="bg-white p-6 rounded-3xl border shadow-sm border-l-8 border-blue-900">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Total Temuan Cloud</p>
+                <p className="text-4xl font-black text-blue-900 mt-1">{records.length}</p>
+              </div>
+              <div className="bg-white p-6 rounded-3xl border shadow-sm border-l-8 border-emerald-500">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Tuntas</p>
+                <p className="text-4xl font-black text-emerald-600 mt-1">{records.filter(r => r.status === 'Selesai').length}</p>
+              </div>
+              <div className="bg-white p-6 rounded-3xl border shadow-sm border-l-8 border-amber-500">
+                <p className="text-[10px] font-black text-slate-400 uppercase tracking-widest">Dalam Proses</p>
+                <p className="text-4xl font-black text-amber-600 mt-1">{records.filter(r => r.status !== 'Selesai').length}</p>
+              </div>
+            </div>
+
+            <div className="bg-blue-900 rounded-3xl p-6 text-white shadow-2xl relative overflow-hidden">
+               <div className="flex items-center gap-2 mb-4">
+                  <Globe size={18} className="text-blue-300" />
+                  <h3 className="text-xs font-black uppercase tracking-widest opacity-80">ID Komputer Anda: <span className="font-mono text-amber-400">{user?.uid.slice(0,8)}...</span></h3>
+                </div>
+                <p className="text-xs opacity-70 leading-relaxed">
+                  Semua data yang Anda input atau edit di sini akan secara otomatis terupdate di komputer rekan kerja lainnya yang sedang membuka aplikasi ini.
+                </p>
+            </div>
+          </div>
+        )}
+
+        {/* INPUT TAB */}
+        {activeTab === 'input' && (
+          <form onSubmit={handleSubmit} className="bg-white p-6 md:p-8 rounded-[2rem] border shadow-xl space-y-6 animate-in slide-in-from-bottom-4 duration-500 no-print">
+            <div className="flex justify-between items-center border-b pb-4">
+              <h2 className="font-black text-blue-900 uppercase tracking-tight text-lg">
+                {isEditMode ? 'Update Laporan Cloud' : 'Laporan Baru (Kirim ke Cloud)'}
+              </h2>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+              <div className="space-y-2">
+                <label className="text-[10px] font-black uppercase text-slate-400 ml-1">Lampiran Foto</label>
+                <div 
+                  onClick={() => fileInputRef.current.click()}
+                  className="w-full h-56 border-4 border-dashed border-slate-100 rounded-[2rem] flex flex-col items-center justify-center bg-slate-50 cursor-pointer overflow-hidden relative"
+                >
+                  {formData.photo ? (
+                    <img src={formData.photo} className="w-full h-full object-cover" alt="Preview" />
+                  ) : (
+                    <><Camera size={32} className="text-slate-300 mb-2"/><p className="text-[10px] font-black text-slate-400 uppercase">Pilih Foto (Max 800KB)</p></>
+                  )}
+                </div>
+                <input type="file" accept="image/*" capture="environment" ref={fileInputRef} onChange={handleCapturePhoto} className="hidden" />
+              </div>
+              <div className="space-y-4">
+                <div>
+                  <label className="text-[10px] font-black uppercase text-slate-400 ml-1">Lokasi Ruangan</label>
+                  <select className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-sm font-bold outline-none focus:border-blue-900" value={formData.ruangan} onChange={e => setFormData({...formData, ruangan: e.target.value})} required>
+                    <option value="">Pilih Ruangan...</option>
+                    {rooms.map(r => <option key={r} value={r}>{r}</option>)}
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase text-slate-400 ml-1">Status Perbaikan</label>
+                  <select className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-sm font-bold outline-none focus:border-blue-900" value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})}>
+                    <option value="Belum Selesai">Belum Selesai</option>
+                    <option value="Proses">Sedang Dikerjakan</option>
+                    <option value="Selesai">Selesai / Tuntas</option>
+                  </select>
+                </div>
+                <div>
+                  <label className="text-[10px] font-black uppercase text-slate-400 ml-1">Tanggal</label>
+                  <input type="date" className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-sm font-bold outline-none focus:border-blue-900" value={formData.tgl} onChange={e => setFormData({...formData, tgl: e.target.value})} />
+                </div>
+              </div>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+              <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 ml-1 tracking-widest">Detail Temuan</label>
+                <textarea className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-sm h-32 outline-none focus:border-blue-900" value={formData.temuan} onChange={e => setFormData({...formData, temuan: e.target.value})} placeholder="Deskripsikan kerusakan..." required />
+              </div>
+              <div>
+                <label className="text-[10px] font-black uppercase text-slate-400 ml-1 tracking-widest">Tindak Lanjut</label>
+                <textarea className="w-full p-4 bg-slate-50 border-2 border-slate-100 rounded-2xl text-sm h-32 outline-none focus:border-blue-900" value={formData.tindakan} onChange={e => setFormData({...formData, tindakan: e.target.value})} placeholder="Apa yang sudah diperbaiki?" />
+              </div>
+            </div>
+            <button type="submit" className="w-full bg-blue-900 text-white py-5 rounded-2xl font-black uppercase tracking-[0.2em] shadow-lg hover:bg-blue-800 transition-all flex items-center justify-center gap-3">
+              <Globe size={20}/> {isEditMode ? 'Simpan Perubahan Ke Cloud' : 'Posting ke Cloud'}
+            </button>
+          </form>
+        )}
+
+        {/* DATABASE TAB */}
+        {activeTab === 'database' && (
+          <div className="space-y-4 animate-in fade-in duration-500 no-print">
+            <div className="flex justify-between items-center px-2">
+              <h2 className="font-black text-slate-400 uppercase text-[10px] tracking-widest">Data Monitoring Real-time</h2>
+            </div>
+            <div className="grid grid-cols-1 gap-4">
+              {records.length === 0 ? (
+                <div className="bg-white p-12 rounded-[2rem] text-center border-2 border-dashed border-slate-200">
+                  <RefreshCw className="w-8 h-8 mx-auto text-slate-200 animate-spin mb-3" />
+                  <p className="text-xs font-bold text-slate-300 uppercase tracking-widest">Menunggu Data Cloud...</p>
+                </div>
+              ) : records.map(r => (
+                <div key={r.id} className="bg-white p-5 rounded-[2rem] border shadow-sm flex flex-col md:flex-row gap-5 relative group transition-all hover:shadow-md">
+                  <div className="w-full md:w-32 h-32 rounded-2xl bg-slate-100 overflow-hidden border-2 border-slate-50 flex-shrink-0">
+                    {r.photo ? <img src={r.photo} className="w-full h-full object-cover" alt="Bukti" /> : <div className="w-full h-full flex items-center justify-center text-slate-300"><Camera size={24}/></div>}
+                  </div>
+                  <div className="flex-1 space-y-2">
+                    <div className="flex justify-between items-start">
+                      <div>
+                        <h3 className="font-black text-blue-900 text-lg uppercase leading-none">{r.ruangan}</h3>
+                        <p className="text-[10px] font-bold text-slate-300 mt-1">{r.tgl}</p>
+                      </div>
+                      <div className={`px-3 py-1 rounded-full text-[9px] font-black uppercase border ${r.status==='Selesai'?'bg-emerald-50 text-emerald-600 border-emerald-100':'bg-amber-50 text-amber-600 border-amber-100'}`}>{r.status}</div>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                      <div className="bg-slate-50 p-3 rounded-xl"><p className="text-[8px] font-black text-slate-400 uppercase mb-1">Temuan</p><p className="text-xs leading-relaxed">{r.temuan}</p></div>
+                      <div className="bg-blue-50/50 p-3 rounded-xl"><p className="text-[8px] font-black text-blue-400 uppercase mb-1">Tindak Lanjut</p><p className="text-xs italic font-bold text-blue-900">{r.tindakan || '-'}</p></div>
+                    </div>
+                  </div>
+                  <div className="flex md:flex-col gap-2 border-t md:border-t-0 md:border-l pt-4 md:pt-0 md:pl-4">
+                    <button onClick={() => { setFormData(r); setIsEditMode(true); setCurrentEditId(r.id); setActiveTab('input'); }} className="p-3 text-blue-600 hover:bg-blue-50 rounded-xl transition-colors"><Edit3 size={18}/></button>
+                    <button onClick={() => deleteRecord(r.id)} className="p-3 text-rose-400 hover:bg-rose-50 rounded-xl transition-colors"><Trash2 size={18}/></button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* REKAPITULASI TAB (LOG DETAIL VS RINGKASAN) */}
+        {activeTab === 'rekap' && (
+          <div className="space-y-6 animate-in fade-in duration-500">
+             {/* Sub-menu Navigation */}
+            <div className="bg-blue-900 p-6 rounded-[2rem] text-white space-y-6 no-print shadow-xl">
+              <div className="flex justify-between items-center">
+                <div className="flex gap-2 bg-blue-800/50 p-1 rounded-xl">
+                  <button 
+                    onClick={() => setRekapSubTab('ringkasan')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${rekapSubTab==='ringkasan'?'bg-white text-blue-900':'text-blue-300'}`}
+                  >
+                    <TableIcon size={14}/> Ringkasan
+                  </button>
+                  <button 
+                    onClick={() => setRekapSubTab('detail')}
+                    className={`flex items-center gap-2 px-4 py-2 rounded-lg text-[10px] font-black uppercase transition-all ${rekapSubTab==='detail'?'bg-white text-blue-900':'text-blue-300'}`}
+                  >
+                    <List size={14}/> Detail Log
+                  </button>
+                </div>
+                <button onClick={() => window.print()} className="bg-white text-blue-900 p-2.5 rounded-xl hover:bg-slate-100 transition-all shadow-lg"><Printer size={18}/></button>
+              </div>
+
+              <div className="flex flex-wrap gap-4 items-end border-t border-blue-800 pt-4">
+                <div className="flex-1 min-w-[150px]">
+                  <label className="text-[10px] font-black uppercase opacity-60 mb-2 block tracking-widest">Bulan Laporan</label>
+                  <select className="w-full bg-blue-800 border-none rounded-xl p-3 font-bold text-sm outline-none" value={reportMonth} onChange={e => setReportMonth(e.target.value)}>
+                    {MONTHS.map((m, i) => <option key={m} value={String(i+1).padStart(2, '0')}>{m}</option>)}
+                  </select>
+                </div>
+                <div className="flex-1 min-w-[150px]">
+                  <label className="text-[10px] font-black uppercase opacity-60 mb-2 block tracking-widest">Tahun Laporan</label>
+                  <select className="w-full bg-blue-800 border-none rounded-xl p-3 font-bold text-sm outline-none" value={reportYear} onChange={e => setReportYear(e.target.value)}>
+                    {[2024, 2025, 2026].map(y => <option key={y} value={String(y)}>{y}</option>)}
+                  </select>
+                </div>
+              </div>
+            </div>
+
+            {/* Print Area */}
+            <div className="bg-white p-8 md:p-12 rounded-[2rem] border shadow-sm print:shadow-none print:border-none print:p-0 min-h-[800px]">
+              <div className="text-center border-b-4 border-double border-slate-900 pb-4 mb-8">
+                <h2 className="text-2xl font-black uppercase tracking-tighter">RSU Dadi Keluarga Purwokerto</h2>
+                <p className="text-[10px] font-bold uppercase tracking-[0.4em] text-slate-500">
+                  {rekapSubTab === 'ringkasan' ? 'Laporan Ringkasan Kelayakan Ruangan' : 'Log Detail Temuan Kerusakan Sarpras'}
+                </p>
+                <p className="text-[10px] font-bold text-slate-400 mt-1">Periode: {MONTHS[parseInt(reportMonth)-1]} {reportYear}</p>
+              </div>
+
+              {rekapSubTab === 'ringkasan' ? (
+                /* VIEW RINGKASAN */
+                <div className="animate-in fade-in duration-300">
+                  <table className="w-full border-collapse">
+                    <thead>
+                      <tr className="bg-slate-100 border-y-2 border-slate-900">
+                        <th className="p-3 text-[10px] font-black uppercase text-left border">No</th>
+                        <th className="p-3 text-[10px] font-black uppercase text-left border">Nama Ruangan</th>
+                        <th className="p-3 text-[10px] font-black uppercase text-center border">Temuan</th>
+                        <th className="p-3 text-[10px] font-black uppercase text-center border text-emerald-600">Selesai</th>
+                        <th className="p-3 text-[10px] font-black uppercase text-center border text-amber-600">Proses</th>
+                        <th className="p-3 text-[10px] font-black uppercase text-center border">Skor (%)</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {summaryData.map((row, idx) => (
+                        <tr key={row.ruangan} className="border-b">
+                          <td className="p-3 text-xs border text-slate-400 font-bold">{idx + 1}</td>
+                          <td className="p-3 text-xs border font-black text-slate-700 uppercase">{row.ruangan}</td>
+                          <td className="p-3 text-xs border text-center font-bold">{row.total}</td>
+                          <td className="p-3 text-xs border text-center font-bold text-emerald-600">{row.selesai}</td>
+                          <td className="p-3 text-xs border text-center font-bold text-amber-600">{row.proses}</td>
+                          <td className="p-3 text-xs border text-center font-black bg-slate-50">{row.score}%</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  <p className="mt-8 text-[9px] italic text-slate-400">* Data di atas diambil secara real-time dari basis data cloud monitoring sarpras.</p>
+                </div>
+              ) : (
+                /* VIEW LOG DETAIL */
+                <div className="animate-in fade-in duration-300">
+                  <table className="w-full border-collapse">
+                    <thead>
+                      <tr className="bg-slate-100 border-y-2 border-slate-900">
+                        <th className="p-3 text-[9px] font-black border text-left">Tanggal</th>
+                        <th className="p-3 text-[9px] font-black border text-left">Lokasi</th>
+                        <th className="p-3 text-[9px] font-black border text-left">Temuan Kerusakan</th>
+                        <th className="p-3 text-[9px] font-black border text-left">Tindakan Perbaikan</th>
+                        <th className="p-3 text-[9px] font-black border text-center">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {filteredRecords.length === 0 ? (
+                        <tr><td colSpan="5" className="p-10 text-center text-[10px] font-bold text-slate-300 uppercase">Belum ada data untuk bulan ini</td></tr>
+                      ) : filteredRecords.map(r => (
+                        <tr key={r.id} className="border-b">
+                          <td className="p-2 text-[10px] border whitespace-nowrap font-bold text-slate-400">{r.tgl.split('-').reverse().join('/')}</td>
+                          <td className="p-2 text-[10px] border font-black uppercase text-blue-900">{r.ruangan}</td>
+                          <td className="p-2 text-[10px] border leading-tight">{r.temuan}</td>
+                          <td className="p-2 text-[10px] border leading-tight italic text-slate-600">{r.tindakan || '-'}</td>
+                          <td className={`p-2 text-[9px] border text-center font-black uppercase ${r.status==='Selesai'?'text-emerald-600':'text-amber-600'}`}>{r.status}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
+
+              {/* Tanda Tangan */}
+              <div className="mt-16 grid grid-cols-2 text-center text-[10px] font-bold uppercase tracking-widest">
+                <div className="space-y-20">
+                  <p>Mengetahui,<br/>Koord. Rumah Tangga</p>
+                  <p className="underline">( ........................................ )</p>
+                </div>
+                <div className="space-y-20">
+                  <p>Dicetak pada: {new Date().toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' })}<br/>Manager Umum</p>
+                  <p className="underline">( ........................................ )</p>
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
+      </main>
+
+      <footer className="mt-12 text-center text-[10px] font-bold text-slate-300 uppercase tracking-[0.3em] pb-10 no-print font-sans">
+        RSU Dadi Keluarga Cloud System v2.0
+      </footer>
+    </div>
+  );
+}
